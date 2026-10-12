@@ -1,0 +1,178 @@
+networks:
+  redis-net:
+    driver: bridge
+
+volumes:
+  redis-master-data:
+  redis-replica-1-data:
+  redis-replica-2-data:
+  sentinel-1-data:
+  sentinel-2-data:
+  sentinel-3-data:
+
+# ==============================================================================
+# REUSABLE CONFIGURATIONS (DRY via YAML Anchors)
+# ==============================================================================
+x-redis-replica-base: &redis-replica-base
+  image: ${REDIS_IMAGE:-redis:7.2-alpine}
+  command: ["redis-server", "/etc/redis/redis.conf", "--replicaof", "redis-master", "6379"]
+  networks:
+    - redis-net
+  depends_on:
+    redis-master:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "redis-cli", "ping"]
+    interval: 2s
+    timeout: 2s
+    retries: 5
+    start_period: 3s
+  restart: unless-stopped
+
+x-sentinel-base: &sentinel-base
+  image: ${REDIS_IMAGE:-redis:7.2-alpine}
+  command: sh -c "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"
+  networks:
+    - redis-net
+  depends_on:
+    redis-master:
+      condition: service_healthy
+    redis-replica-1:
+      condition: service_healthy
+    redis-replica-2:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+    interval: 2s
+    timeout: 2s
+    retries: 5
+    start_period: 3s
+  restart: unless-stopped
+
+# ==============================================================================
+# SERVICES
+# ==============================================================================
+services:
+  # 1. Master
+  redis-master:
+    image: ${REDIS_IMAGE:-redis:7.2-alpine}
+    container_name: redis-master
+    command: ["redis-server", "/etc/redis/redis.conf", "--replica-announce-ip", "redis-master"]
+    volumes:
+      - ./src/infra/redis/config/redis.conf:/etc/redis/redis.conf:ro
+      - type: volume
+        source: redis-master-data
+        target: /data
+        volume:
+          nocopy: true
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - redis-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+      start_period: 3s
+    restart: unless-stopped
+
+  # 2. Replicas
+  redis-replica-1:
+    <<: *redis-replica-base
+    container_name: redis-replica-1
+    command: ["redis-server", "/etc/redis/redis.conf", "--replicaof", "redis-master", "6379", "--replica-announce-ip", "redis-replica-1"]
+    volumes:
+      - ./src/infra/redis/config/redis.conf:/etc/redis/redis.conf:ro
+      - type: volume
+        source: redis-replica-1-data
+        target: /data
+        volume:
+          nocopy: true
+
+  redis-replica-2:
+    <<: *redis-replica-base
+    container_name: redis-replica-2
+    command: ["redis-server", "/etc/redis/redis.conf", "--replicaof", "redis-master", "6379", "--replica-announce-ip", "redis-replica-2"]
+    volumes:
+      - ./src/infra/redis/config/redis.conf:/etc/redis/redis.conf:ro
+      - type: volume
+        source: redis-replica-2-data
+        target: /data
+        volume:
+          nocopy: true
+
+  # 3. Sentinels (3 nodes, Quorum = 2)
+  sentinel-1:
+    <<: *sentinel-base
+    container_name: sentinel-1
+    volumes:
+      - ./src/infra/redis/config/sentinel.conf:/etc/redis/sentinel.conf:ro
+      - type: volume
+        source: sentinel-1-data
+        target: /data
+        volume:
+          nocopy: true
+    ports:
+      - "${SENTINEL_PORT_1:-26379}:26379"
+
+  sentinel-2:
+    <<: *sentinel-base
+    container_name: sentinel-2
+    volumes:
+      - ./src/infra/redis/config/sentinel.conf:/etc/redis/sentinel.conf:ro
+      - type: volume
+        source: sentinel-2-data
+        target: /data
+        volume:
+          nocopy: true
+    ports:
+      - "${SENTINEL_PORT_2:-26380}:26379"
+
+  sentinel-3:
+    <<: *sentinel-base
+    container_name: sentinel-3
+    volumes:
+      - ./src/infra/redis/config/sentinel.conf:/etc/redis/sentinel.conf:ro
+      - type: volume
+        source: sentinel-3-data
+        target: /data
+        volume:
+          nocopy: true
+    ports:
+      - "${SENTINEL_PORT_3:-26381}:26379"
+
+  # 4. NestJS Application (Bun runtime)
+  nest-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ${APP_CONTAINER_NAME:-nest-sentinel-app}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-1000}
+      REDIS_MASTER_NAME: ${REDIS_MASTER_NAME:-mymaster}
+      REDIS_MASTER_HOST: ${REDIS_MASTER_HOST:-redis-master}
+      REDIS_REPLICA_1_HOST: ${REDIS_REPLICA_1_HOST:-redis-replica-1}
+      REDIS_REPLICA_2_HOST: ${REDIS_REPLICA_2_HOST:-redis-replica-2}
+      SENTINEL_HOST_1: ${SENTINEL_HOST_1:-sentinel-1}
+      SENTINEL_HOST_2: ${SENTINEL_HOST_2:-sentinel-2}
+      SENTINEL_HOST_3: ${SENTINEL_HOST_3:-sentinel-3}
+      SENTINEL_PORT: ${SENTINEL_PORT:-26379}
+      REDIS_COMMAND_TIMEOUT_MS: ${REDIS_COMMAND_TIMEOUT_MS:-8000}
+      REDIS_CONNECT_TIMEOUT_MS: ${REDIS_CONNECT_TIMEOUT_MS:-5000}
+      REDIS_MAX_RETRIES: ${REDIS_MAX_RETRIES:-null}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_SENTINEL_PASSWORD: ${REDIS_SENTINEL_PASSWORD:-}
+    networks:
+      - redis-net
+    depends_on:
+      sentinel-1:
+        condition: service_healthy
+      sentinel-2:
+        condition: service_healthy
+      sentinel-3:
+        condition: service_healthy
+    restart: unless-stopped
