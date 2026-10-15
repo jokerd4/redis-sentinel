@@ -32,7 +32,7 @@ export class RedisOptionsFactory {
       autoResendUnfulfilledCommands: true,
 
       sentinelRetryStrategy: (times: number): number => {
-        return Math.min(times * 500, 2000);
+        return Math.min(times * 200, 2000);
       },
 
       retryStrategy: (times: number): number => {

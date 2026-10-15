@@ -10,7 +10,7 @@ export class SentinelEventsService implements OnModuleInit, OnModuleDestroy {
   private subscriber: Redis | null = null;
   private onMasterSwitchCallback?: (newMaster: RedisNode) => void;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ConfigService) { }
 
   onModuleInit(): void {
     this.initSubscriber();
@@ -65,7 +65,7 @@ export class SentinelEventsService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`[SENTINEL EVENT: SWITCH MASTER] Master migrated: ${oldHost}:${oldPort} => ${newHost}:${newPort} at ${now}`);
         this.onMasterSwitchCallback?.({
           host: newHost,
-          port: Number.parseInt(newPort, 10) || 6379,
+          port: Number.parseInt(newPort, 10),
         });
         break;
       }

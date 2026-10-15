@@ -8,7 +8,9 @@
     "build": "nest build",
     "start": "bun run src/main.ts",
     "start:dev": "bun --watch src/main.ts",
-    "start:prod": "bun dist/main.js"
+    "start:prod": "bun dist/main.js",
+    "test:requests": "bun scripts/test-requests.ts",
+    "seed:redis": "bun scripts/seed-redis.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.8",

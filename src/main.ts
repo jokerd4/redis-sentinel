@@ -8,10 +8,11 @@ async function bootstrap(): Promise<void> {
 
   app.enableShutdownHooks();
 
-  const port = process.env.APP_PORT || process.env.PORT || 3000;
-  await app.listen(port);
+  const port = Number(process.env.APP_PORT);
+  const host = process.env.APP_HOST;
+  await app.listen(port, host);
 
-  logger.log(`NestJS Redis Sentinel application is running on port ${port}`);
+  logger.log(`NestJS Redis Sentinel application is running on ${host}:${port}`);
 }
 
 bootstrap();

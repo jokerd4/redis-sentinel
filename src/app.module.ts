@@ -1,8 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { AppController } from './app.controller';
 import { RedisModule } from './infra/redis/redis.module';
-import { WorkerModule } from './worker/worker.module';
+import { TimeModule } from './time/time.module';
 
 @Module({
   imports: [
@@ -10,8 +9,7 @@ import { WorkerModule } from './worker/worker.module';
       isGlobal: true,
     }),
     RedisModule,
-    WorkerModule,
+    TimeModule,
   ],
-  controllers: [AppController],
 })
 export class AppModule {}

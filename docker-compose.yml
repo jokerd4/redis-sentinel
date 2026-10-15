@@ -152,7 +152,8 @@ services:
       - "${APP_PORT:-3000}:3000"
     environment:
       PORT: 3000
-      WORKER_INTERVAL_MS: ${WORKER_INTERVAL_MS:-1000}
+      APP_PORT: ${APP_PORT:-3000}
+      APP_HOST: ${APP_HOST:-0.0.0.0}
       REDIS_MASTER_NAME: ${REDIS_MASTER_NAME:-mymaster}
       REDIS_MASTER_HOST: ${REDIS_MASTER_HOST:-redis-master}
       REDIS_REPLICA_1_HOST: ${REDIS_REPLICA_1_HOST:-redis-replica-1}
