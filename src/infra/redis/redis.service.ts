@@ -115,6 +115,28 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client.set(key, value, 'EX', ttlSeconds);
   }
 
+  public async setPersistent(key: string, value: string): Promise<'OK' | null> {
+    return this.client.set(key, value);
+  }
+
+  public async scanKeys(pattern: string): Promise<string[]> {
+    const keys: string[] = [];
+    const stream = this.client.scanStream({ match: pattern, count: 1000 });
+    for await (const batch of stream) {
+      keys.push(...(batch as string[]));
+    }
+    return keys;
+  }
+
+  public async deleteByPattern(pattern: string): Promise<number> {
+    const keys = await this.scanKeys(pattern);
+    let deleted = 0;
+    for (let i = 0; i < keys.length; i += 1000) {
+      deleted += await this.client.unlink(...keys.slice(i, i + 1000));
+    }
+    return deleted;
+  }
+
   public async get(key: string): Promise<string | null> {
     return this.client.get(key);
   }

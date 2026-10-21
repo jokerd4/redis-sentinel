@@ -148,6 +148,12 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ${APP_CONTAINER_NAME:-nest-sentinel-app}
+    # Default 1024 fds is exhausted by client connections at ~5k req/s,
+    # and during a failover pause every waiting request holds one open.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:

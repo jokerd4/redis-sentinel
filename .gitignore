@@ -4,3 +4,7 @@ dist/
 *.log
 .DS_Store
 .vscode/
+reports/
+docs/
+*.tsbuildinfo
+package-lock.json

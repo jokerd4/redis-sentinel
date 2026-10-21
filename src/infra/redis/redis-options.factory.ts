@@ -30,18 +30,25 @@ export class RedisOptionsFactory {
       enableOfflineQueue: true,
       maxRetriesPerRequest: maxRetries,
       autoResendUnfulfilledCommands: true,
+      // Drop the connection as soon as any sentinel publishes +switch-master,
+      // otherwise the client keeps writing to the demoted master.
+      failoverDetector: true,
 
       sentinelRetryStrategy: (times: number): number => {
         return Math.min(times * 200, 2000);
       },
 
+      // Each attempt asks sentinels for the current master, so retrying fast
+      // shortens the pause after a failover without hammering a dead node.
       retryStrategy: (times: number): number => {
-        return Math.min(times * 1000, 3000);
+        return Math.min(times * 100, 500);
       },
 
-      reconnectOnError: (err: Error): boolean => {
+      // 2 = reconnect and resend the failed command instead of rejecting it
+      reconnectOnError: (err: Error): 2 | false => {
         const msg = err.message || '';
-        return msg.includes('READONLY') || msg.includes('ETIMEDOUT') || msg.includes('ECONNREFUSED');
+        const shouldResend = msg.includes('READONLY') || msg.includes('ETIMEDOUT') || msg.includes('ECONNREFUSED');
+        return shouldResend ? 2 : false;
       },
     };
   }
