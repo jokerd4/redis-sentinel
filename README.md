@@ -6,7 +6,7 @@ High-availability Redis Sentinel cluster (1 Master, 2 Replicas, 3 Sentinels, Quo
 
 ## Architecture
 
-- **Topology:** 1 Master, 2 Replicas, 3 Sentinels (`quorum 2`, `down-after-milliseconds 3000`, `failover-timeout 15000`).
+- **Topology:** 1 Master, 2 Replicas, 3 Sentinels (`quorum 2`, `down-after-milliseconds 3000`, `failover-timeout 5000`).
 - **Persistence:** RDB snapshots + AOF (`appendfsync everysec`, RDB preamble), data in Docker volumes.
 - **Client:** `ioredis` via Sentinel:
   - `failoverDetector` drops the old master on `+switch-master`;
