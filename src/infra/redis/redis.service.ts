@@ -2,104 +2,61 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { RedisOptionsFactory } from './redis-options.factory';
-import { RedisNode } from './redis.interface';
-import { SentinelEventsService } from './sentinel-events.service';
-
-interface PendingAck {
-  epoch: number;
-  resolve: () => void;
-  reject: (err: Error) => void;
-}
-
-// Thrown when the write and its WAIT ended up on different connections
-class ConnectionChangedError extends Error {
-  constructor() {
-    super('Connection changed before the write was confirmed by replicas');
-  }
-} 
-
-interface SocketStreamInfo {
-  remoteAddress?: string;
-  remotePort?: number;
-}
+import { ConnectionChangedError, ReplicaAckBatcher } from './replica-ack-batcher';
 
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisService.name);
   private client: Redis;
 
-  private currentMaster: RedisNode | null = null;
-  private lastKnownMaster: RedisNode | null = null;
-  private downAt: Date | null = null;
   private isConnected = false;
+  private downAt: Date | null = null;
   private isShuttingDown = false;
   private endRecoveries = 0;
   private endRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // WAIT: a write is acknowledged only after this many replicas confirmed it (0 = off)
-  private waitReplicas = 0;
-  private waitTimeoutMs = 1000;
-  // Incremented on every lost connection: WAIT only covers writes made on the same connection
-  private connectionEpoch = 0;
-  private pendingAcks: PendingAck[] = [];
-  private waitInFlight = false;
-
+  // WAIT confirmation of writes, null = off (async replication)
+  private replicaAcks: ReplicaAckBatcher | null = null;
   // How long a write may keep retrying after a lost connection
   private retryWindowMs = 15000;
   private nextReady: { promise: Promise<void>; resolve: () => void } | null = null;
 
-  constructor(
-    private readonly configService: ConfigService,
-    private readonly sentinelEvents: SentinelEventsService,
-  ) {}
+  constructor(private readonly configService: ConfigService) {}
 
   onModuleInit(): void {
-    const defaultMasterHost = this.configService.get<string>('REDIS_MASTER_HOST', 'redis-master');
-    const defaultMasterPort = Number.parseInt(this.configService.get<string>('REDIS_PORT', '6379'), 10) || 6379;
-    this.currentMaster = { host: defaultMasterHost, port: defaultMasterPort };
-    this.lastKnownMaster = { ...this.currentMaster };
-
-    this.waitReplicas = Math.max(0, Number(this.configService.get<string>('REDIS_WAIT_REPLICAS', '0')) || 0);
-    this.waitTimeoutMs = Math.max(1, Number(this.configService.get<string>('REDIS_WAIT_TIMEOUT_MS', '1000')) || 1000);
-    if (this.waitReplicas > 0) {
-      this.logger.log(`Writes wait for ${this.waitReplicas} replica(s), timeout ${this.waitTimeoutMs}ms`);
-    }
-    this.retryWindowMs = Number(this.configService.get<string>('REDIS_COMMAND_TIMEOUT_MS')) || this.retryWindowMs;
-
     const options = RedisOptionsFactory.createClientOptions(this.configService);
     this.logger.log(`Connecting to Redis Sentinel: group="${options.name}"`);
+    this.retryWindowMs = options.commandTimeout || this.retryWindowMs;
 
     this.client = new Redis(options);
     this.registerClientEvents();
 
-    this.sentinelEvents.onMasterSwitch((newMaster: RedisNode) => {
-      this.currentMaster = newMaster;
-    });
+    const waitReplicas = Math.max(0, Number(this.configService.get<string>('REDIS_WAIT_REPLICAS', '0')) || 0);
+    const waitTimeoutMs = Math.max(1, Number(this.configService.get<string>('REDIS_WAIT_TIMEOUT_MS', '1000')) || 1000);
+    if (waitReplicas > 0) {
+      this.replicaAcks = new ReplicaAckBatcher(this.client, waitReplicas, waitTimeoutMs);
+      this.logger.log(`Writes wait for ${waitReplicas} replica(s), timeout ${waitTimeoutMs}ms`);
+    }
   }
 
+  // The master's name is logged by SentinelEventsService on +switch-master
   private registerClientEvents(): void {
     this.client.on('ready', () => {
       this.isConnected = true;
-      const node = this.currentMaster || this.extractMasterNode();
-      const nodeDisplay = `${node.host}:${node.port}`;
-
       if (this.downAt) {
         const downtime = ((Date.now() - this.downAt.getTime()) / 1000).toFixed(2);
-        this.logger.warn(`[MASTER UP] Reconnected to Master: ${nodeDisplay} | Total downtime: ${downtime}s`);
+        this.logger.warn(`[MASTER UP] Reconnected to master | Total downtime: ${downtime}s`);
         this.downAt = null;
       } else {
-        this.logger.log(`[CONNECTED] Active Master: ${nodeDisplay} | Time: ${new Date().toISOString()}`);
+        this.logger.log(`[CONNECTED] Connected to master at ${new Date().toISOString()}`);
       }
 
-      this.currentMaster = node;
-      this.lastKnownMaster = node;
       this.endRecoveries = 0;
       this.nextReady?.resolve();
       this.nextReady = null;
     });
 
     this.client.on('close', () => {
-      this.connectionEpoch++;
       this.handleDisconnect('Connection lost');
     });
 
@@ -132,43 +89,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   private handleDisconnect(reason: string): void {
     if (!this.isConnected) return;
     this.isConnected = false;
-    this.currentMaster = null;
-
-    if (!this.downAt) {
-      this.downAt = new Date();
-      const last = this.lastKnownMaster ? `${this.lastKnownMaster.host}:${this.lastKnownMaster.port}` : 'unknown';
-      this.logger.error(`[MASTER DOWN] ${reason} to ${last} at ${this.downAt.toISOString()}`);
-    }
-  }
-
-  private extractMasterNode(): RedisNode {
-    try {
-      const stream = (this.client as unknown as { stream?: SocketStreamInfo })?.stream;
-      if (stream?.remoteAddress) {
-        return { host: stream.remoteAddress, port: stream.remotePort || 6379 };
-      }
-    } catch {
-      // fallback
-    }
-    return this.currentMaster || { host: 'unknown', port: 6379 };
-  }
-
-  public getActiveMaster(): RedisNode | null {
-    return this.currentMaster;
-  }
-
-  public getActiveMasterString(): string {
-    if (!this.isConnected || !this.currentMaster) {
-      if (this.lastKnownMaster) {
-        return `reconnecting... (was ${this.lastKnownMaster.host}:${this.lastKnownMaster.port})`;
-      }
-      return 'reconnecting...';
-    }
-    return `${this.currentMaster.host}:${this.currentMaster.port}`;
-  }
-
-  public isReady(): boolean {
-    return this.isConnected && this.client?.status === 'ready';
+    this.downAt = new Date();
+    this.logger.error(`[MASTER DOWN] ${reason} at ${this.downAt.toISOString()}`);
   }
 
   public async set(key: string, value: string, ttlSeconds = 10): Promise<'OK' | null> {
@@ -191,7 +113,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     for (;;) {
       try {
         const result = await write();
-        if (this.waitReplicas > 0) await this.confirmByReplicas();
+        await this.replicaAcks?.confirm();
         return result;
       } catch (err) {
         const retryable = err instanceof ConnectionChangedError || (err as Error).message === 'Connection is closed.';
@@ -200,6 +122,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // All waiting writes share one promise instead of each adding a 'ready' listener to the client
   private async waitUntilReady(deadline: number): Promise<boolean> {
     if (this.client.status === 'ready') return true;
     const remaining = deadline - Date.now();
@@ -215,48 +138,6 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     const ready = await Promise.race([this.nextReady.promise.then(() => true), timedOut]);
     clearTimeout(timer);
     return ready;
-  }
-
-  /**
-   * Resolves only after WAIT confirmed the caller's last write on `waitReplicas` replicas, so an acknowledged
-   * write survives a master crash (Sentinel promotes the replica with the highest offset).
-   * Must be called right after the write resolved, before the connection could change.
-   * WAIT blocks the connection, so concurrent writes share one WAIT instead of queueing behind each other.
-   */
-  private confirmByReplicas(): Promise<void> {
-    const epoch = this.connectionEpoch;
-    return new Promise<void>((resolve, reject) => {
-      this.pendingAcks.push({ epoch, resolve, reject });
-      void this.flushWait();
-    });
-  }
-
-  private async flushWait(): Promise<void> {
-    if (this.waitInFlight || this.pendingAcks.length === 0) return;
-    this.waitInFlight = true;
-    const batch = this.pendingAcks;
-    this.pendingAcks = [];
-    const epoch = this.connectionEpoch;
-
-    try {
-      const acked = await this.client.wait(this.waitReplicas, this.waitTimeoutMs);
-      // Reconnected meanwhile: WAIT ran on a new connection and says nothing about our writes
-      const sameConnection = epoch === this.connectionEpoch;
-      for (const p of batch) {
-        if (!sameConnection || p.epoch !== epoch) {
-          p.reject(new ConnectionChangedError());
-        } else if (acked < this.waitReplicas) {
-          p.reject(new Error(`Write confirmed by ${acked}/${this.waitReplicas} replicas within ${this.waitTimeoutMs}ms`));
-        } else {
-          p.resolve();
-        }
-      }
-    } catch (err) {
-      for (const p of batch) p.reject(err as Error);
-    } finally {
-      this.waitInFlight = false;
-      void this.flushWait();
-    }
   }
 
   public async scanKeys(pattern: string): Promise<string[]> {
@@ -279,10 +160,6 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   public async get(key: string): Promise<string | null> {
     return this.client.get(key);
-  }
-
-  public async del(key: string): Promise<number> {
-    return this.client.del(key);
   }
 
   async onModuleDestroy(): Promise<void> {

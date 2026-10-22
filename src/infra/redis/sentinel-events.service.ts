@@ -2,22 +2,16 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { RedisOptionsFactory } from './redis-options.factory';
-import { RedisNode } from './redis.interface';
 
 @Injectable()
 export class SentinelEventsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SentinelEventsService.name);
   private subscriber: Redis | null = null;
-  private onMasterSwitchCallback?: (newMaster: RedisNode) => void;
 
   constructor(private readonly configService: ConfigService) { }
 
   onModuleInit(): void {
     this.initSubscriber();
-  }
-
-  public onMasterSwitch(callback: (newMaster: RedisNode) => void): void {
-    this.onMasterSwitchCallback = callback;
   }
 
   private initSubscriber(): void {
@@ -63,10 +57,6 @@ export class SentinelEventsService implements OnModuleInit, OnModuleDestroy {
       case '+switch-master': {
         const [, oldHost, oldPort, newHost, newPort] = parts;
         this.logger.warn(`[SENTINEL EVENT: SWITCH MASTER] Master migrated: ${oldHost}:${oldPort} => ${newHost}:${newPort} at ${now}`);
-        this.onMasterSwitchCallback?.({
-          host: newHost,
-          port: Number.parseInt(newPort, 10),
-        });
         break;
       }
       case '+convert-to-slave': {

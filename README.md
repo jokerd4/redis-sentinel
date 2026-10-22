@@ -32,7 +32,8 @@ High-availability Redis Sentinel cluster (1 Master, 2 Replicas, 3 Sentinels, Quo
     ├── infra/redis/
     │   ├── config/redis.conf         # Redis config (replication, persistence, memory)
     │   ├── config/sentinel.conf      # Sentinel config (quorum, timeouts)
-    │   ├── redis.service.ts          # Redis facade (commands & connection status)
+    │   ├── redis.service.ts          # Redis facade (commands, reconnect, write retry)
+    │   ├── replica-ack-batcher.ts    # WAIT confirmation of writes (REDIS_WAIT_REPLICAS)
     │   ├── redis-options.factory.ts  # Client options, retry & failover handling
     │   └── sentinel-events.service.ts# Sentinel Pub/Sub event logger
     ├── time/                         # GET /time
