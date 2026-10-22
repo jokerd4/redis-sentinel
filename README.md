@@ -12,7 +12,10 @@ High-availability Redis Sentinel cluster (1 Master, 2 Replicas, 3 Sentinels, Quo
   - `failoverDetector` drops the old master on `+switch-master`;
   - commands are queued while there is no master and resent after reconnect;
   - commands rejected with `READONLY` are resent;
-  - reconnect backoff is 100–500 ms.
+  - reconnect backoff is 100–500 ms;
+  - the client recovers from the ioredis `end` state by itself (a `+switch-master` during a reconnect could leave it closed for good);
+  - writes (`SET`) are repeated after a lost connection instead of returning an error;
+  - optional `WAIT`: a write is acknowledged only after replicas confirmed it (`REDIS_WAIT_REPLICAS`).
 - **Graceful switchover:** `scripts/switchover.ts` changes the master with zero data loss.
 
 ```
@@ -63,9 +66,11 @@ High-availability Redis Sentinel cluster (1 Master, 2 Replicas, 3 Sentinels, Quo
 | `SENTINEL_HOST_1..3` | `sentinel-1..3` | Sentinel hosts for the client |
 | `SENTINEL_PORT` | `26379` | Sentinel port inside the network |
 | `SENTINEL_PORT_1..3` | `26379..26381` | Sentinel ports published on the host |
-| `REDIS_COMMAND_TIMEOUT_MS` | `8000` | Command timeout; must exceed the failover pause (~7 s), tested with `15000` |
+| `REDIS_COMMAND_TIMEOUT_MS` | `8000` | Command timeout, also the retry window for writes. Must exceed the failover pause: ~5–7 s normally, up to ~15 s after a split Sentinel vote. Tested with `15000` |
 | `REDIS_CONNECT_TIMEOUT_MS` | `5000` | Connection timeout |
 | `REDIS_MAX_RETRIES` | `null` | Max retries per command (`null` = wait until reconnect) |
+| `REDIS_WAIT_REPLICAS` | `0` | Acknowledge a write only after N replicas confirmed it (`WAIT`). `0` = off, async replication |
+| `REDIS_WAIT_TIMEOUT_MS` | `1000` | `WAIT` timeout; fewer confirmations within it return an error |
 | `REDIS_PASSWORD` / `REDIS_SENTINEL_PASSWORD` | empty | Auth passwords |
 
 Sentinel parameters (quorum, down-after, failover-timeout, parallel-syncs) are set in `src/infra/redis/config/sentinel.conf`.
@@ -148,3 +153,38 @@ The script sends `POST /stress/...` at the given rate and checks every acknowled
 | Switchover (`bun run switchover`) | 1k / 5k/s | 0 | 0 | 1.8 / 2.4 s |
 | Master crash (`docker kill`) | 1k / 5k/s | 0 | 0 | 5.0 / 5.3 s |
 | Master hang (`docker pause` 10 s) | 1k / 5k/s | 0 | 0 | 7.1 / 6.5 s |
+
+Plain `SENTINEL FAILOVER` at 1k/s lost 10 927 acknowledged writes without a single error: the old master keeps accepting
+writes until Sentinel demotes it. `bun run switchover` closes this window.
+
+### Network faults, `WAIT` on and off
+
+All runs at 1k/s. "Lost" = acknowledged (`200 OK`) writes missing in Redis after the run.
+
+| Scenario | Without `WAIT`: lost / errors | `WAIT 1`: lost / errors |
+|---|---|---|
+| Master crash, 500 ms replication lag | **346–443** / 0 (3 runs) | **0** / 0–1 316 (6 runs) |
+| Network partition 10 s: master cut off from replicas and sentinels, app still reaches it | **4 697–4 855** / 0 (2 runs) | **0** / 257 |
+| Master crash, app 50 ms away from Redis | 0 / 0\* | 0 / 0 |
+| Switchover, app 50 ms away from Redis | 0 / 0 | 0 / 0 |
+
+- Asynchronous replication loses the writes that the master acknowledged but had not sent to a replica yet.
+  The client gets no error. With a fast network this window is under 1 ms, so a crash test usually shows 0 lost, by chance.
+- A partition is the worst case: Sentinel promotes a replica while the isolated master keeps acknowledging writes,
+  and they are wiped when the network heals.
+- `WAIT 1` turns a silent loss into an error: an isolated master cannot get a replica confirmation.
+  The errors in the 500 ms lag runs came from the HTTP layer under thousands of concurrent connections and from the ioredis `end` race (fixed since).
+- Delay between the app and Redis does not cause loss, only latency.
+
+\* Measured before the ioredis `end` fix: 1 024 errors from that race, not rerun after the fix.
+
+Write latency (p50):
+
+| Network | Without `WAIT` | `WAIT 1` |
+|---|---|---|
+| Docker network | 0.6 ms | 0.7 ms |
+| App 50 ms away from Redis | 51 ms | 127 ms |
+| 500 ms replication lag | ~1 ms | ~1.3 s |
+
+`WAIT` blocks the connection, so concurrent writes share one `WAIT`. A write waits for the current `WAIT` and then for its own:
+up to two replication round trips.
